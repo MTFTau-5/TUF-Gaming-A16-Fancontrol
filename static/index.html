@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>天选5 Pro 风扇调控</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+    background: #1b1e24; color: #e6e6e6;
+    display: flex; justify-content: center; padding: 24px;
+  }
+  #app { width: 860px; }
+  h1 { font-size: 20px; margin-bottom: 16px; }
+  .cards { display: flex; gap: 12px; margin-bottom: 16px; }
+  .card {
+    flex: 1; background: #262a32; border-radius: 10px; padding: 14px 16px;
+  }
+  .card .label { font-size: 12px; color: #9aa4b2; }
+  .card .value { font-size: 26px; font-weight: 600; margin-top: 4px; }
+  .card .value small { font-size: 14px; color: #9aa4b2; font-weight: 400; }
+  .panel { background: #262a32; border-radius: 10px; padding: 16px; }
+  .toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+  .tabs { display: flex; gap: 6px; }
+  .tabs button {
+    background: #333945; color: #cfd6df; border: none; border-radius: 6px;
+    padding: 6px 18px; cursor: pointer; font-size: 14px;
+  }
+  .tabs button.active { background: #3b82f6; color: #fff; }
+  select, .btn {
+    background: #333945; color: #e6e6e6; border: none; border-radius: 6px;
+    padding: 7px 14px; font-size: 14px; cursor: pointer;
+  }
+  .btn.primary { background: #3b82f6; color: #fff; }
+  .btn.danger { background: #b3402f; color: #fff; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  canvas {
+    display: block; width: 100%; height: 360px; background: #1f232b;
+    border-radius: 8px; cursor: crosshair;
+  }
+  #msg { margin-top: 10px; min-height: 20px; font-size: 13px; }
+  #msg.ok { color: #4ade80; }
+  #msg.err { color: #f87171; }
+  .hint { font-size: 12px; color: #9aa4b2; margin-top: 8px; line-height: 1.6; }
+  .toggle { display: flex; align-items: center; gap: 6px; font-size: 14px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>天选5 Pro（FA607PV）风扇曲线调控</h1>
+
+  <div class="cards">
+    <div class="card"><div class="label">CPU 温度</div><div class="value" id="cpuTemp">-- <small>℃</small></div></div>
+    <div class="card"><div class="label">GPU 温度</div><div class="value" id="gpuTemp">-- <small>℃</small></div></div>
+    <div class="card"><div class="label">CPU 风扇</div><div class="value" id="cpuRpm">-- <small>RPM</small></div></div>
+    <div class="card"><div class="label">GPU 风扇</div><div class="value" id="gpuRpm">-- <small>RPM</small></div></div>
+  </div>
+
+  <div class="panel">
+    <div class="toolbar">
+      <div class="tabs">
+        <button id="tabCpu" class="active" onclick="switchFan('cpu')">CPU 风扇</button>
+        <button id="tabGpu" onclick="switchFan('gpu')">GPU 风扇</button>
+      </div>
+      <label class="toggle">配置档
+        <select id="profile">
+          <option>Balanced</option>
+          <option>Quiet</option>
+          <option>Performance</option>
+        </select>
+      </label>
+      <button class="btn primary" id="btnSave" onclick="saveCurve()">保存当前曲线</button>
+      <button class="btn" id="btnEnable" onclick="toggleEnable(true)">启用曲线</button>
+      <button class="btn" onclick="toggleEnable(false)">停用曲线</button>
+      <button class="btn danger" onclick="restoreDefault()">恢复默认</button>
+      <button class="btn" onclick="loadStatus(true)">重新读取</button>
+    </div>
+    <canvas id="cv" width="820" height="360"></canvas>
+    <div id="msg"></div>
+    <div class="hint">
+    </div>
+  </div>
+</div>
+
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const PAD = { l: 48, r: 20, t: 20, b: 38 };
+const TEMP_MAX = 105, PWM_MAX = 100;
+
+let state = { cpu: [], gpu: [] };   // [{tempC, pct}]
+let currentFan = 'cpu';
+let dirty = false;
+let dragIdx = -1;
+
+function plotW() { return cv.width - PAD.l - PAD.r; }
+function plotH() { return cv.height - PAD.t - PAD.b; }
+function toX(t) { return PAD.l + t / TEMP_MAX * plotW(); }
+function toY(p) { return PAD.t + (1 - p / PWM_MAX) * plotH(); }
+function fromX(x) { return Math.round((x - PAD.l) / plotW() * TEMP_MAX); }
+function fromY(y) { return Math.round((1 - (y - PAD.t) / plotH()) * PWM_MAX); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function draw() {
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.font = '11px sans-serif';
+
+  // 网格与坐标
+  ctx.strokeStyle = '#333945'; ctx.fillStyle = '#9aa4b2';
+  for (let t = 0; t <= 100; t += 10) {
+    const x = toX(t);
+    ctx.beginPath(); ctx.moveTo(x, PAD.t); ctx.lineTo(x, cv.height - PAD.b); ctx.stroke();
+    ctx.fillText(t + '°', x - 6, cv.height - PAD.b + 16);
+  }
+  for (let p = 0; p <= 100; p += 20) {
+    const y = toY(p);
+    ctx.beginPath(); ctx.moveTo(PAD.l, y); ctx.lineTo(cv.width - PAD.r, y); ctx.stroke();
+    ctx.fillText(p + '%', 14, y + 4);
+  }
+
+  const pts = state[currentFan];
+  if (!pts.length) {
+    ctx.fillStyle = '#f87171';
+    ctx.fillText('未读取到曲线数据（asus_custom_fan_curve 接口不可用？）', PAD.l + 20, 60);
+    return;
+  }
+
+  // 曲线
+  ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const x = toX(p.tempC), y = toY(p.pct);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.lineWidth = 1;
+
+  // 数据点
+  pts.forEach((p, i) => {
+    const x = toX(p.tempC), y = toY(p.pct);
+    ctx.fillStyle = (i === dragIdx) ? '#f59e0b' : '#3b82f6';
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e6e6e6';
+    ctx.fillText(`${p.tempC}℃ ${p.pct}%`, x - 22, y - 12);
+  });
+}
+
+function switchFan(f) {
+  currentFan = f;
+  document.getElementById('tabCpu').classList.toggle('active', f === 'cpu');
+  document.getElementById('tabGpu').classList.toggle('active', f === 'gpu');
+  draw();
+}
+
+function pointAt(mx, my) {
+  const pts = state[currentFan];
+  for (let i = 0; i < pts.length; i++) {
+    const dx = mx - toX(pts[i].tempC), dy = my - toY(pts[i].pct);
+    if (dx * dx + dy * dy < 120) return i;
+  }
+  return -1;
+}
+
+cv.addEventListener('mousedown', e => {
+  const r = cv.getBoundingClientRect();
+  dragIdx = pointAt(e.clientX - r.left, e.clientY - r.top);
+});
+window.addEventListener('mouseup', () => { dragIdx = -1; });
+cv.addEventListener('mousemove', e => {
+  if (dragIdx < 0) return;
+  const r = cv.getBoundingClientRect();
+  const pts = state[currentFan];
+  let t = fromX(e.clientX - r.left), p = fromY(e.clientY - r.top);
+  const prev = pts[dragIdx - 1], next = pts[dragIdx + 1];
+  t = clamp(t, prev ? prev.tempC : 0, next ? next.tempC : TEMP_MAX);
+  p = clamp(p, prev ? prev.pct : 0, next ? next.pct : 100);
+  pts[dragIdx] = { tempC: t, pct: p };
+  dirty = true;
+  draw();
+});
+
+function showMsg(text, ok) {
+  const el = document.getElementById('msg');
+  el.textContent = text;
+  el.className = ok ? 'ok' : 'err';
+}
+
+async function api(path, body) {
+  const opt = body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  };
+  const res = await fetch(path, opt);
+  return res.json();
+}
+
+async function loadStatus(forceCurve) {
+  try {
+    const s = await api('/api/status');
+    document.getElementById('cpuTemp').innerHTML = (s.cpuTempC >= 0 ? s.cpuTempC : '--') + ' <small>℃</small>';
+    document.getElementById('gpuTemp').innerHTML = (s.gpuTempC >= 0 ? s.gpuTempC : '--') + ' <small>℃</small>';
+    document.getElementById('cpuRpm').innerHTML = (s.fans.cpu.rpm >= 0 ? s.fans.cpu.rpm : '--') + ' <small>RPM</small>';
+    document.getElementById('gpuRpm').innerHTML = (s.fans.gpu.rpm >= 0 ? s.fans.gpu.rpm : '--') + ' <small>RPM</small>';
+    if (s.profile) document.getElementById('profile').value = s.profile;
+    // 曲线只在主动加载/保存后刷新，拖动中不被轮询覆盖
+    if (forceCurve || !dirty) {
+      for (const f of ['cpu', 'gpu'])
+        state[f] = s.fans[f].points.map(p => ({ tempC: p.tempC, pct: Math.round(p.pwm * 100 / 255) }));
+      dirty = false;
+      draw();
+    }
+  } catch (e) {
+    showMsg('后端连接失败：' + e.message, false);
+  }
+}
+
+async function saveCurve() {
+  const profile = document.getElementById('profile').value;
+  const body = {
+    fan: currentFan, profile,
+    points: state[currentFan].map(p => [p.tempC, p.pct])
+  };
+  const r = await api('/api/curve', body);
+  showMsg(r.ok ? `${currentFan.toUpperCase()} 曲线已保存到 ${profile}` : '保存失败：' + r.error, r.ok);
+  if (r.ok) { dirty = false; await loadStatus(true); }
+}
+
+async function toggleEnable(enabled) {
+  const profile = document.getElementById('profile').value;
+  const r = await api('/api/enable', { enabled, profile });
+  showMsg(r.ok ? (enabled ? '曲线已启用' : '曲线已停用') : '操作失败：' + r.error, r.ok);
+}
+
+async function restoreDefault() {
+  if (!confirm('确定恢复 BIOS 默认风扇控制？当前自定义曲线将被清除。')) return;
+  const profile = document.getElementById('profile').value;
+  const r = await api('/api/default', { profile });
+  showMsg(r.ok ? '已恢复默认曲线' : '恢复失败：' + r.error, r.ok);
+  if (r.ok) await loadStatus(true);
+}
+
+loadStatus(true);
+setInterval(() => loadStatus(false), 2000);  // RPM/温度定时刷新
+</script>
+</body>
+</html>
