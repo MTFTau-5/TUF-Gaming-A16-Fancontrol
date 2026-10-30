@@ -1,7 +1,7 @@
 # 天选5 Pro 风扇调控（fancontrol）
 
 ASUS TUF Gaming A16 FA607PV 在 Arch Linux 下的风扇曲线调控工具。
-C++ 本地后端 + 浏览器前端，。
+C++ 本地后端 + 浏览器前端。
 
 ## 构建与运行
 
